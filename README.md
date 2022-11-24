@@ -1,6 +1,6 @@
 ## Project #3: Virtual Memory Simulator
 
-### *** Due on 00:00, December 11 (Saturday) ***
+### *** Due on 24:00, December 9 (Friday) ***
 
 
 ### Goal
@@ -104,7 +104,7 @@ To duplicate the parent's address space, set up the PTE in the child's page tabl
 	- Register http/https URL and with a deploy token and password.
 	- Start the repository by cloning this repository.
 	- Make sure your repository is private.
-	- Also, make sure the token is valid through December 14 (due + 3 slip days + 1 day)
+	- Also, make sure the token is valid through December 13 (due + 3 slip days + 1 day)
 
 - *THE INSTRUCTOR WILL NOT ANSWER THE QUESTIONS ABOUT THOSE ALREADY SPECIFIED ON THE HANDOUT.*
 - *QUESTIONS OVER EMAIL WILL BE IGNORED UNLESS IT CONCERNS YOUR PRIVACY.*
