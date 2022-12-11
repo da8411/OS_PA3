@@ -16,6 +16,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
+#include <string.h>
 
 #include "types.h"
 #include "list_head.h"
@@ -39,8 +40,9 @@ extern struct pagetable *ptbr;
 /**
  * TLB of the system.
  */
+//256개?
 extern struct tlb_entry tlb[1UL << (PTES_PER_PAGE_SHIFT * 2)];
-
+int tlbSize = 0;
 
 /**
  * The number of mappings for each page frame. Can be used to determine how
@@ -66,9 +68,30 @@ extern unsigned int mapcounts[];
  */
 bool lookup_tlb(unsigned int vpn, unsigned int *pfn)
 {
+	for(int i = 0; i < tlbSize; i++) {
+        if(tlb[i].vpn == vpn) {
+            *pfn = tlb[i].pfn;
+            return true;
+        }
+    }
 	return false;
 }
 
+int find_smallest_pfn(unsigned int* mapcounts)
+{
+    bool found = false;
+    for(int i = 0; i < NR_PAGEFRAMES; i++) {
+        if(*(mapcounts++) == 0) {
+            found = true;
+            return i;
+        }
+    }
+    
+    if (found == false) {
+        fprintf(stderr, "[ERROR] MAX find_smallest_pfn");
+    }
+    return NR_PAGEFRAMES;
+}
 
 /**
  * insert_tlb(@vpn, @pfn)
@@ -80,6 +103,11 @@ bool lookup_tlb(unsigned int vpn, unsigned int *pfn)
  */
 void insert_tlb(unsigned int vpn, unsigned int pfn)
 {
+	struct tlb_entry new_entry;
+    new_entry.valid = true;
+    new_entry.vpn = vpn;
+    new_entry.pfn = pfn;
+    tlb[tlbSize++] = new_entry;
 }
 
 
@@ -101,7 +129,37 @@ void insert_tlb(unsigned int vpn, unsigned int pfn)
  */
 unsigned int alloc_page(unsigned int vpn, unsigned int rw)
 {
-	return -1;
+    unsigned int outer;
+    unsigned int inner;
+    outer = vpn / NR_PTES_PER_PAGE;
+    inner = vpn % NR_PTES_PER_PAGE;
+
+    // if memory is not allocated, allocate memory
+    if(!ptbr->outer_ptes[outer]) {
+    ptbr->outer_ptes[outer] = malloc(sizeof(struct pte_directory)*NR_PTES_PER_PAGE);
+    }
+    struct pte* pte = &(ptbr->outer_ptes[outer]->ptes[inner]);
+    // set valid true
+    pte->valid = true;
+    if(rw == RW_READ) {
+        pte->writable = false;
+        pte->private = RW_READ;
+    } else if(rw == (RW_WRITE | RW_READ)) {
+        pte->writable = true;
+    }
+    //set pfn to possible smallest pfn
+    int smallest_pfn = find_smallest_pfn(mapcounts);
+
+    // return -1 if all page frames are allocated
+    if(smallest_pfn == NR_PAGEFRAMES) {
+        return -1;
+    }
+
+    pte->pfn = smallest_pfn;
+    mapcounts[smallest_pfn]++;
+
+    //inc s_smallest_pfn by 1
+    return smallest_pfn;
 }
 
 
@@ -116,6 +174,26 @@ unsigned int alloc_page(unsigned int vpn, unsigned int rw)
  */
 void free_page(unsigned int vpn)
 {
+    unsigned int outer;
+    unsigned int inner;
+    outer = vpn / NR_PTES_PER_PAGE;
+    inner = vpn % NR_PTES_PER_PAGE;
+
+    struct pte* pte = &(ptbr->outer_ptes[outer]->ptes[inner]);
+
+    pte->valid = false;
+    pte->writable = false;
+    mapcounts[pte->pfn]--;
+    pte->pfn = 0;
+
+    //struct tlb_entry default_tlb;
+    for(int i = 0; i < tlbSize; i++) {
+        if(tlb[i].vpn == vpn) {
+            tlb[i].valid = false;
+            tlbSize--;
+            return;
+        }
+    }
 }
 
 
@@ -137,7 +215,56 @@ void free_page(unsigned int vpn)
  */
 bool handle_page_fault(unsigned int vpn, unsigned int rw)
 {
-	return false;
+    unsigned int outer;
+    unsigned int inner;
+    outer = vpn / NR_PTES_PER_PAGE;
+    inner = vpn % NR_PTES_PER_PAGE;
+
+    struct pte *pte;
+
+    // 안들어오는데?
+    // pte is invalid
+    if(ptbr->outer_ptes[outer] != NULL ) {
+        pte = &(ptbr->outer_ptes[outer]->ptes[inner]);
+        if (pte->valid == false) {
+            return false;
+        }
+    }
+    
+    // 안들어오는데?
+    // page directory is invalid
+    if(ptbr->outer_ptes[outer] == NULL) {
+        fprintf(stderr,"pte invalid2");
+        return false;
+    }
+    //pte is not writable but @rw is for write
+    pte = &(ptbr->outer_ptes[outer]->ptes[inner]);
+    if(pte->writable == false && (rw & RW_WRITE) == RW_WRITE) {
+        //원래 read만 가능
+        if(pte->private == RW_READ) {
+            return false;
+        }
+        //원래 write 가능이지만 fork하느라 바뀜
+        if(pte->private != RW_READ) {
+            // 나만 참조하고있음
+            if(mapcounts[pte->pfn] == 1) {
+                pte->writable = true;
+                return true;
+            }
+            // 다른애도 참조하고 있음
+            if(mapcounts[pte->pfn] >= 2) {
+                mapcounts[pte->pfn]--;
+                pte->pfn = find_smallest_pfn(mapcounts);
+                pte->writable = true;
+                mapcounts[pte->pfn]++;
+                return true;
+            }
+        }
+    }
+
+    //이거는 에러임
+    fprintf(stderr, "error\n");
+    return false;
 }
 
 
@@ -159,7 +286,65 @@ bool handle_page_fault(unsigned int vpn, unsigned int rw)
  *   bit in PTE and mapcounts for shared pages. You may use pte->private for 
  *   storing some useful information :-)
  */
+
+// 원래 read였던것은 fork후에도 read만해야함
+// 원래 write였던것은 fork후에도 write가능
+// private에 write가능하다고 표시
+
+//On a context switch, TLB should be flushed
+//– Each process has its own VA to PA mapping
+//– Thus, cannot share TLB entries between processes
 void switch_process(unsigned int pid)
 {
+    memset(tlb, 0, sizeof(tlb));
+    // 프로세스 리스트 찾아서 있으면 변경
+    struct process *p, *cursor = NULL;
+
+    list_for_each_entry_safe(p, cursor,&processes,list) {
+        if(p->pid == pid) {
+            list_add_tail(&current->list,&processes);
+            current = p;
+            ptbr = &(p->pagetable);
+            list_del_init(&p->list);
+            goto exit;
+        }
+    }
+
+    // 프로세스 리스트에 없으면 새로 생성
+    struct process *next =(struct process*)malloc(sizeof(struct process));
+    struct pagetable* nextPtbr = &(next->pagetable);
+    for(int i = 0 ; i < NR_PTES_PER_PAGE ; i++) {
+        if(!ptbr->outer_ptes[i]) {
+            continue;
+        } else {
+            next->pagetable.outer_ptes[i] = malloc(sizeof(struct pte_directory)*NR_PTES_PER_PAGE);
+        }
+
+        for (int j = 0 ; j < NR_PTES_PER_PAGE ;j++) {
+            if (ptbr->outer_ptes[i]->ptes[j].valid) {
+                struct pte forkedPte = ptbr->outer_ptes[i]->ptes[j];
+                mapcounts[ptbr->outer_ptes[i]->ptes[j].pfn]++;
+                //원래 read만 가능한것이었으면 read만 가능했다고 표시
+                if (ptbr->outer_ptes[i]->ptes[j].writable == 0) {
+                    forkedPte.private = ptbr->outer_ptes[i]->ptes[j].private;
+                }
+                // copy on write
+                ptbr->outer_ptes[i]->ptes[j].writable = false;
+                forkedPte.valid = true;
+                forkedPte.writable = false;
+                forkedPte.pfn = ptbr->outer_ptes[i]->ptes[j].pfn;
+                nextPtbr->outer_ptes[i]->ptes[j] = forkedPte;
+            }       
+        }
+    }
+    next->pid = pid;
+    next->list = current->list;
+    list_add_tail(&current->list,&processes);
+    current = next;
+    ptbr = nextPtbr;
+
+    exit:
+    return;
 }
+
 
